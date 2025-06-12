@@ -3,6 +3,7 @@ name: Daily release
 on:
   schedule:
     - cron: "0 3 * * *"
+  workflow_dispatch:    # Add this line
 jobs:
   build:
     runs-on: ubuntu-latest
