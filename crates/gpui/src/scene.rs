@@ -8,7 +8,12 @@ use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
     Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
-use std::{fmt::Debug, iter::Peekable, ops::Range, slice};
+use std::{
+    fmt::Debug,
+    iter::Peekable,
+    ops::{Add, Range, Sub},
+    slice,
+};
 
 #[allow(non_camel_case_types, unused)]
 pub(crate) type PathVertex_ScaledPixels = PathVertex<ScaledPixels>;
@@ -25,6 +30,7 @@ pub(crate) struct Scene {
     pub(crate) paths: Vec<Path<ScaledPixels>>,
     pub(crate) underlines: Vec<Underline>,
     pub(crate) monochrome_sprites: Vec<MonochromeSprite>,
+    pub(crate) subpixel_sprites: Vec<SubpixelSprite>,
     pub(crate) polychrome_sprites: Vec<PolychromeSprite>,
     pub(crate) surfaces: Vec<PaintSurface>,
 }
@@ -39,19 +45,9 @@ impl Scene {
         self.quads.clear();
         self.underlines.clear();
         self.monochrome_sprites.clear();
+        self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
-    }
-
-    #[cfg_attr(
-        all(
-            any(target_os = "linux", target_os = "freebsd"),
-            not(any(feature = "x11", feature = "wayland"))
-        ),
-        allow(dead_code)
-    )]
-    pub fn paths(&self) -> &[Path<ScaledPixels>] {
-        &self.paths
     }
 
     pub fn len(&self) -> usize {
@@ -107,6 +103,10 @@ impl Scene {
                 sprite.order = order;
                 self.monochrome_sprites.push(sprite.clone());
             }
+            Primitive::SubpixelSprite(sprite) => {
+                sprite.order = order;
+                self.subpixel_sprites.push(sprite.clone());
+            }
             Primitive::PolychromeSprite(sprite) => {
                 sprite.order = order;
                 self.polychrome_sprites.push(sprite.clone());
@@ -137,6 +137,8 @@ impl Scene {
         self.underlines.sort_by_key(|underline| underline.order);
         self.monochrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+        self.subpixel_sprites
+            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.polychrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.surfaces.sort_by_key(|surface| surface.order);
@@ -166,6 +168,9 @@ impl Scene {
             monochrome_sprites: &self.monochrome_sprites,
             monochrome_sprites_start: 0,
             monochrome_sprites_iter: self.monochrome_sprites.iter().peekable(),
+            subpixel_sprites: &self.subpixel_sprites,
+            subpixel_sprites_start: 0,
+            subpixel_sprites_iter: self.subpixel_sprites.iter().peekable(),
             polychrome_sprites: &self.polychrome_sprites,
             polychrome_sprites_start: 0,
             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
@@ -191,6 +196,7 @@ pub(crate) enum PrimitiveKind {
     Path,
     Underline,
     MonochromeSprite,
+    SubpixelSprite,
     PolychromeSprite,
     Surface,
 }
@@ -208,6 +214,7 @@ pub(crate) enum Primitive {
     Path(Path<ScaledPixels>),
     Underline(Underline),
     MonochromeSprite(MonochromeSprite),
+    SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
 }
@@ -220,6 +227,7 @@ impl Primitive {
             Primitive::Path(path) => &path.bounds,
             Primitive::Underline(underline) => &underline.bounds,
             Primitive::MonochromeSprite(sprite) => &sprite.bounds,
+            Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
         }
@@ -232,6 +240,7 @@ impl Primitive {
             Primitive::Path(path) => &path.content_mask,
             Primitive::Underline(underline) => &underline.content_mask,
             Primitive::MonochromeSprite(sprite) => &sprite.content_mask,
+            Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
         }
@@ -261,6 +270,9 @@ struct BatchIterator<'a> {
     monochrome_sprites: &'a [MonochromeSprite],
     monochrome_sprites_start: usize,
     monochrome_sprites_iter: Peekable<slice::Iter<'a, MonochromeSprite>>,
+    subpixel_sprites: &'a [SubpixelSprite],
+    subpixel_sprites_start: usize,
+    subpixel_sprites_iter: Peekable<slice::Iter<'a, SubpixelSprite>>,
     polychrome_sprites: &'a [PolychromeSprite],
     polychrome_sprites_start: usize,
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
@@ -287,6 +299,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.monochrome_sprites_iter.peek().map(|s| s.order),
                 PrimitiveKind::MonochromeSprite,
+            ),
+            (
+                self.subpixel_sprites_iter.peek().map(|s| s.order),
+                PrimitiveKind::SubpixelSprite,
             ),
             (
                 self.polychrome_sprites_iter.peek().map(|s| s.order),
@@ -389,6 +405,27 @@ impl<'a> Iterator for BatchIterator<'a> {
                     sprites: &self.monochrome_sprites[sprites_start..sprites_end],
                 })
             }
+            PrimitiveKind::SubpixelSprite => {
+                let texture_id = self.subpixel_sprites_iter.peek().unwrap().tile.texture_id;
+                let sprites_start = self.subpixel_sprites_start;
+                let mut sprites_end = sprites_start + 1;
+                self.subpixel_sprites_iter.next();
+                while self
+                    .subpixel_sprites_iter
+                    .next_if(|sprite| {
+                        (sprite.order, batch_kind) < max_order_and_kind
+                            && sprite.tile.texture_id == texture_id
+                    })
+                    .is_some()
+                {
+                    sprites_end += 1;
+                }
+                self.subpixel_sprites_start = sprites_end;
+                Some(PrimitiveBatch::SubpixelSprites {
+                    texture_id,
+                    sprites: &self.subpixel_sprites[sprites_start..sprites_end],
+                })
+            }
             PrimitiveKind::PolychromeSprite => {
                 let texture_id = self.polychrome_sprites_iter.peek().unwrap().tile.texture_id;
                 let sprites_start = self.polychrome_sprites_start;
@@ -447,6 +484,11 @@ pub(crate) enum PrimitiveBatch<'a> {
         texture_id: AtlasTextureId,
         sprites: &'a [MonochromeSprite],
     },
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    SubpixelSprites {
+        texture_id: AtlasTextureId,
+        sprites: &'a [SubpixelSprite],
+    },
     PolychromeSprites {
         texture_id: AtlasTextureId,
         sprites: &'a [PolychromeSprite],
@@ -482,7 +524,7 @@ pub(crate) struct Underline {
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,
     pub thickness: ScaledPixels,
-    pub wavy: bool,
+    pub wavy: u32,
 }
 
 impl From<Underline> for Primitive {
@@ -642,6 +684,24 @@ impl From<MonochromeSprite> for Primitive {
 
 #[derive(Clone, Debug)]
 #[repr(C)]
+pub(crate) struct SubpixelSprite {
+    pub order: DrawOrder,
+    pub pad: u32, // align to 8 bytes
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    pub color: Hsla,
+    pub tile: AtlasTile,
+    pub transformation: TransformationMatrix,
+}
+
+impl From<SubpixelSprite> for Primitive {
+    fn from(sprite: SubpixelSprite) -> Self {
+        Primitive::SubpixelSprite(sprite)
+    }
+}
+
+#[derive(Clone, Debug)]
+#[repr(C)]
 pub(crate) struct PolychromeSprite {
     pub order: DrawOrder,
     pub pad: u32, // align to 8 bytes
@@ -681,7 +741,7 @@ pub(crate) struct PathId(pub(crate) usize);
 #[derive(Clone, Debug)]
 pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub(crate) id: PathId,
-    order: DrawOrder,
+    pub(crate) order: DrawOrder,
     pub(crate) bounds: Bounds<P>,
     pub(crate) content_mask: ContentMask<P>,
     pub(crate) vertices: Vec<PathVertex<P>>,
@@ -801,6 +861,16 @@ impl Path<Pixels> {
             st_position: st.2,
             content_mask: Default::default(),
         });
+    }
+}
+
+impl<T> Path<T>
+where
+    T: Clone + Debug + Default + PartialEq + PartialOrd + Add<T, Output = T> + Sub<Output = T>,
+{
+    #[allow(unused)]
+    pub(crate) fn clipped_bounds(&self) -> Bounds<T> {
+        self.bounds.intersect(&self.content_mask.bounds)
     }
 }
 

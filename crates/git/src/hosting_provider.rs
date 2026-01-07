@@ -5,8 +5,11 @@ use async_trait::async_trait;
 use derive_more::{Deref, DerefMut};
 use gpui::{App, Global, SharedString};
 use http_client::HttpClient;
+use itertools::Itertools;
 use parking_lot::RwLock;
 use url::Url;
+
+use crate::repository::RepoPath;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PullRequest {
@@ -17,8 +20,8 @@ pub struct PullRequest {
 #[derive(Clone)]
 pub struct GitRemote {
     pub host: Arc<dyn GitHostingProvider + Send + Sync + 'static>,
-    pub owner: String,
-    pub repo: String,
+    pub owner: SharedString,
+    pub repo: SharedString,
 }
 
 impl std::fmt::Debug for GitRemote {
@@ -55,8 +58,19 @@ pub struct BuildCommitPermalinkParams<'a> {
 
 pub struct BuildPermalinkParams<'a> {
     pub sha: &'a str,
-    pub path: &'a str,
+    /// URL-escaped path using unescaped `/` as the directory separator.
+    pub path: String,
     pub selection: Option<Range<u32>>,
+}
+
+impl<'a> BuildPermalinkParams<'a> {
+    pub fn new(sha: &'a str, path: &RepoPath, selection: Option<Range<u32>>) -> Self {
+        Self {
+            sha,
+            path: path.components().map(urlencoding::encode).join("/"),
+            selection,
+        }
+    }
 }
 
 /// A Git hosting provider.
@@ -77,6 +91,15 @@ pub trait GitHostingProvider {
 
     /// Returns a permalink to a file and/or selection on this hosting provider.
     fn build_permalink(&self, remote: ParsedGitRemote, params: BuildPermalinkParams) -> Url;
+
+    /// Returns a URL to create a pull request on this hosting provider.
+    fn build_create_pull_request_url(
+        &self,
+        _remote: &ParsedGitRemote,
+        _source_branch: &str,
+    ) -> Option<Url> {
+        None
+    }
 
     /// Returns whether this provider supports avatars.
     fn supports_avatars(&self) -> bool;

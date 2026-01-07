@@ -1,7 +1,7 @@
 mod messages;
-mod supermaven_completion_provider;
+mod supermaven_edit_prediction_delegate;
 
-pub use supermaven_completion_provider::*;
+pub use supermaven_edit_prediction_delegate::*;
 
 use anyhow::{Context as _, Result};
 #[allow(unused_imports)]
@@ -25,7 +25,13 @@ use std::{path::PathBuf, process::Stdio, sync::Arc};
 use ui::prelude::*;
 use util::ResultExt;
 
-actions!(supermaven, [SignOut]);
+actions!(
+    supermaven,
+    [
+        /// Signs out of Supermaven.
+        SignOut
+    ]
+);
 
 pub fn init(client: Arc<Client>, cx: &mut App) {
     let supermaven = cx.new(|_| Supermaven::Starting);
@@ -228,18 +234,16 @@ fn find_relevant_completion<'a>(
         }
 
         let original_cursor_offset = buffer.clip_offset(state.prefix_offset, text::Bias::Left);
-        let text_inserted_since_completion_request =
-            buffer.text_for_range(original_cursor_offset..current_cursor_offset);
-        let mut trimmed_completion = state_completion;
-        for chunk in text_inserted_since_completion_request {
-            if let Some(suffix) = trimmed_completion.strip_prefix(chunk) {
-                trimmed_completion = suffix;
-            } else {
-                continue 'completions;
-            }
-        }
+        let text_inserted_since_completion_request: String = buffer
+            .text_for_range(original_cursor_offset..current_cursor_offset)
+            .collect();
+        let trimmed_completion =
+            match state_completion.strip_prefix(&text_inserted_since_completion_request) {
+                Some(suffix) => suffix,
+                None => continue 'completions,
+            };
 
-        if best_completion.map_or(false, |best| best.len() > trimmed_completion.len()) {
+        if best_completion.is_some_and(|best| best.len() > trimmed_completion.len()) {
             continue;
         }
 
@@ -286,31 +290,6 @@ impl SupermavenAgent {
             .context("failed to get stdout for process")?;
 
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded();
-
-        cx.spawn({
-            let client = client.clone();
-            let outgoing_tx = outgoing_tx.clone();
-            async move |this, cx| {
-                let mut status = client.status();
-                while let Some(status) = status.next().await {
-                    if status.is_connected() {
-                        let api_key = client.request(proto::GetSupermavenApiKey {}).await?.api_key;
-                        outgoing_tx
-                            .unbounded_send(OutboundMessage::SetApiKey(SetApiKey { api_key }))
-                            .ok();
-                        this.update(cx, |this, cx| {
-                            if let Supermaven::Spawned(this) = this {
-                                this.account_status = AccountStatus::Ready;
-                                cx.notify();
-                            }
-                        })?;
-                        break;
-                    }
-                }
-                anyhow::Ok(())
-            }
-        })
-        .detach();
 
         Ok(Self {
             _process: process,
@@ -380,9 +359,7 @@ impl SupermavenAgent {
         match message {
             SupermavenMessage::ActivationRequest(request) => {
                 self.account_status = match request.activate_url {
-                    Some(activate_url) => AccountStatus::NeedsActivation {
-                        activate_url: activate_url.clone(),
-                    },
+                    Some(activate_url) => AccountStatus::NeedsActivation { activate_url },
                     None => AccountStatus::Ready,
                 };
             }
@@ -432,4 +409,78 @@ pub struct SupermavenCompletionState {
 pub struct SupermavenCompletion {
     pub id: SupermavenCompletionStateId,
     pub updates: watch::Receiver<()>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use collections::BTreeMap;
+    use gpui::TestAppContext;
+    use language::Buffer;
+
+    #[gpui::test]
+    async fn test_find_relevant_completion_no_first_letter_skip(cx: &mut TestAppContext) {
+        let buffer = cx.new(|cx| Buffer::local("hello world", cx));
+        let buffer_snapshot = buffer.read_with(cx, |buffer, _| buffer.snapshot());
+
+        let mut states = BTreeMap::new();
+        let state_id = SupermavenCompletionStateId(1);
+        let (updates_tx, _) = watch::channel();
+
+        states.insert(
+            state_id,
+            SupermavenCompletionState {
+                buffer_id: buffer.entity_id(),
+                prefix_anchor: buffer_snapshot.anchor_before(0), // Start of buffer
+                prefix_offset: 0,
+                text: "hello".to_string(),
+                dedent: String::new(),
+                updates_tx,
+            },
+        );
+
+        let cursor_position = buffer_snapshot.anchor_after(1);
+
+        let result = find_relevant_completion(
+            &states,
+            buffer.entity_id(),
+            &buffer_snapshot,
+            cursor_position,
+        );
+
+        assert_eq!(result, Some("ello"));
+    }
+
+    #[gpui::test]
+    async fn test_find_relevant_completion_with_multiple_chars(cx: &mut TestAppContext) {
+        let buffer = cx.new(|cx| Buffer::local("hello world", cx));
+        let buffer_snapshot = buffer.read_with(cx, |buffer, _| buffer.snapshot());
+
+        let mut states = BTreeMap::new();
+        let state_id = SupermavenCompletionStateId(1);
+        let (updates_tx, _) = watch::channel();
+
+        states.insert(
+            state_id,
+            SupermavenCompletionState {
+                buffer_id: buffer.entity_id(),
+                prefix_anchor: buffer_snapshot.anchor_before(0), // Start of buffer
+                prefix_offset: 0,
+                text: "hello".to_string(),
+                dedent: String::new(),
+                updates_tx,
+            },
+        );
+
+        let cursor_position = buffer_snapshot.anchor_after(3);
+
+        let result = find_relevant_completion(
+            &states,
+            buffer.entity_id(),
+            &buffer_snapshot,
+            cursor_position,
+        );
+
+        assert_eq!(result, Some("lo"));
+    }
 }

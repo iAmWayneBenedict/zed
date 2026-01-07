@@ -24,9 +24,11 @@ pub struct Model {
     pub provides_grammars: bool,
     pub provides_language_servers: bool,
     pub provides_context_servers: bool,
+    pub provides_agent_servers: bool,
     pub provides_slash_commands: bool,
     pub provides_indexed_docs_providers: bool,
     pub provides_snippets: bool,
+    pub provides_debug_adapters: bool,
 }
 
 impl Model {
@@ -56,6 +58,10 @@ impl Model {
             provides.insert(ExtensionProvides::ContextServers);
         }
 
+        if self.provides_agent_servers {
+            provides.insert(ExtensionProvides::AgentServers);
+        }
+
         if self.provides_slash_commands {
             provides.insert(ExtensionProvides::SlashCommands);
         }
@@ -66,6 +72,10 @@ impl Model {
 
         if self.provides_snippets {
             provides.insert(ExtensionProvides::Snippets);
+        }
+
+        if self.provides_debug_adapters {
+            provides.insert(ExtensionProvides::DebugAdapters);
         }
 
         provides

@@ -1,16 +1,14 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use anyhow::anyhow;
 use calloop::{EventLoop, LoopHandle};
-use futures::channel::oneshot;
 use util::ResultExt;
 
 use crate::platform::linux::LinuxClient;
 use crate::platform::{LinuxCommon, PlatformWindow};
 use crate::{
     AnyWindowHandle, CursorStyle, DisplayId, LinuxKeyboardLayout, PlatformDisplay,
-    PlatformKeyboardLayout, ScreenCaptureSource, WindowParams,
+    PlatformKeyboardLayout, WindowParams,
 };
 
 pub struct HeadlessClientState {
@@ -23,17 +21,17 @@ pub struct HeadlessClientState {
 pub(crate) struct HeadlessClient(Rc<RefCell<HeadlessClientState>>);
 
 impl HeadlessClient {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(liveness: std::sync::Weak<()>) -> Self {
         let event_loop = EventLoop::try_new().unwrap();
 
-        let (common, main_receiver) = LinuxCommon::new(event_loop.get_signal());
+        let (common, main_receiver) = LinuxCommon::new(event_loop.get_signal(), liveness);
 
         let handle = event_loop.handle();
 
         handle
             .insert_source(main_receiver, |event, _, _: &mut HeadlessClient| {
                 if let calloop::channel::Event::Msg(runnable) = event {
-                    runnable.run();
+                    runnable.run_unprofiled();
                 }
             })
             .ok();
@@ -52,7 +50,7 @@ impl LinuxClient for HeadlessClient {
     }
 
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
-        Box::new(LinuxKeyboardLayout::new("unknown".to_string()))
+        Box::new(LinuxKeyboardLayout::new("unknown".into()))
     }
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
@@ -67,15 +65,18 @@ impl LinuxClient for HeadlessClient {
         None
     }
 
+    #[cfg(feature = "screen-capture")]
     fn is_screen_capture_supported(&self) -> bool {
         false
     }
 
+    #[cfg(feature = "screen-capture")]
     fn screen_capture_sources(
         &self,
-    ) -> oneshot::Receiver<anyhow::Result<Vec<Box<dyn ScreenCaptureSource>>>> {
-        let (mut tx, rx) = oneshot::channel();
-        tx.send(Err(anyhow!(
+    ) -> futures::channel::oneshot::Receiver<anyhow::Result<Vec<Rc<dyn crate::ScreenCaptureSource>>>>
+    {
+        let (mut tx, rx) = futures::channel::oneshot::channel();
+        tx.send(Err(anyhow::anyhow!(
             "Headless mode does not support screen capture."
         )))
         .ok();
